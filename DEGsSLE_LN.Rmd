@@ -1,0 +1,192 @@
+---
+title: "SDS397R1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# Version info: R 3.2.3, Biobase 2.30.0, GEOquery 2.40.0, limma 3.26.8
+################################################################
+#   Differential expression analysis with limma
+library(GEOquery)
+library(limma)
+library(umap)
+
+# load series and platform data from GEO
+
+gset <- getGEO("GSE49454", GSEMatrix =TRUE, AnnotGPL=TRUE)
+if (length(gset) > 1) idx <- grep("GPL10558", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+fvarLabels(gset)
+
+# group membership for all samples control(2), SLE,LN
+gsms <- paste0("00111000111000100102221011011100001010010002102111",
+        "11000011121001020220101001002000111101100021112200",
+        "02101010000101000021200100010001000111000001010010",
+        "002021020210011000011010010")
+sml <- strsplit(gsms, split="")[[1]]
+sml
+#see matrix features
+gset
+#access assay data with exprs
+ex <- exprs(gset)
+ex
+#check the dimension of matrix data
+dim(ex)
+#filter out NaN
+ex[which(ex <= 0)] <- NaN
+# log2 transform
+exprs(gset) <- log2(ex) 
+# normalize data to get similar distribution accross arrays
+exprs(gset) <- normalizeBetweenArrays(exprs(gset))
+
+# assign samples to groups and set up design matrix
+gs <- factor(sml)
+gs
+groups <- make.names(c("SLE","LN","Healthy"))
+levels(gs) <- groups
+gs
+#column names for assay groups
+gset$group <- gs
+gset
+#assign assays to each group
+design <- model.matrix(~group + 0, gset)
+colnames(design) <- levels(gs)
+design
+#Count how many rows
+nall <- nrow(gset)
+#get complete cases of vector and reassign
+gset <- gset[complete.cases(exprs(gset)), ]
+
+
+# calculate precision weights and show plot of mean-variance trend
+v <- vooma(gset, design, plot=T)
+v
+# OR weights by group  butit turns out the same(0.3101756)
+vg <- voomaByGroup(gset, group=groups, design, plot=T, cex=0.1, pch=".", col=1:nlevels(gs))
+vg
+# attach gene annotations. Use fdata for metadata
+v$genes <- fData(gset) 
+v
+# fit linear modelfor each gene
+fit  <- lmFit(v)
+fit
+# set up contrasts or groups of interest and recalculate model coefficients
+cts <- c(paste(groups[1],"-",groups[2],sep=""), paste(groups[1],"-",groups[3],sep=""), paste(groups[2],"-",groups[3],sep=""))
+cts
+
+cont.matrix <- makeContrasts(contrasts=cts, levels=design)
+cont.matrix
+??corrplot
+(corrplot::corrplot(cont.matrix, method = 'square'))
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2
+# compute statistics and table of top significant genes(p-values)
+fit2 <- eBayes(fit2, 0.01)
+fit2
+tT <- topTable(fit2, adjust="fdr", sort.by="B", number=250)
+tT
+tT <- subset(tT, select=c("ID","Gene.symbol","Gene.title","adj.P.Val","P.Value","F"))%>%
+  rename(GeneName = "Gene.symbol", GeneInfo="Gene.title",
+         Adjusted.PValue = "adj.P.Val",    PValue = "P.Value", FoldChange = "F")
+write.table(tT, file=stdout(), row.names=F, sep="\t")
+
+# Visualize and quality control test results.
+# Build histogram of P-values for all genes. Normal test
+# hypothesis is that most genes are not differentially expressed.
+mySigValues <- tT%>% 
+  filter(PValue < 0.05)%>%
+  arrange("PValue")
+
+View(mySigValues)
+tT2 <- topTable(fit2, adjust="fdr", sort.by="B", number=Inf)
+hist(tT2$adj.P.Val, col = "purple", border = "white", xlab = "P-adj",
+  ylab = "Number of genes", main = "P-adj value distribution")
+
+# summarize test results matrix as "up", "down" or "not expressed"
+dT <- decideTests(fit2, adjust.method="fdr", p.value=0.05)
+View(dT)
+# Visualize results with Venn diagram from limma package
+#vennDiagram(dT, include = c("up","down"),circle.col=palette())
+vennDiagram(dT, circle.col = palette())
+# create Q-Q plot for t-statistic
+t.good <- which(!is.na(fit2$F)) # filter out bad probes
+qqt(fit2$t[t.good], fit2$df.total[t.good], main="Moderated t statistic")
+
+# volcano plot (log P-value vs log fold change)
+colnames(fit2) # list contrast for columns or group names
+ct <- 1 #SLE/LN
+sle_ctr <- 2
+ln_ctr <- 3
+# choose contrast of interest
+volcanoplot(fit2, coef=ct,main=colnames(fit2)[ct], pch=20,highlight=length(which(dT[,ct]!=0)), names=rep('+', nrow(fit2)))
+
+volcanoplot(fit2, coef=sle_ctr, main=colnames(fit2)[sle_ctr], pch=20,
+  highlight=length(which(dT[,sle_ctr]!=0)), names=rep('+', nrow(fit2)))
+
+volcanoplot(fit2, coef=ln_ctr, main=colnames(fit2)[ln_ctr], pch=20,
+  highlight=length(which(dT[,ln_ctr]!=0)), names=rep('+', nrow(fit2)))
+
+# MD plot (log fold change vs mean log expression)
+# highlight statistically significant (p-adj < 0.05) probes
+plotMD(fit2, column=ct, status=dT[,ct], legend=F, pch=20, cex=1)
+abline(h=0)
+
+################################################################
+# General expression data analysis
+ex <- exprs(gset)
+
+# box-and-whisker plot
+dev.new(width=3+ncol(gset)/6, height=5)
+ord <- order(gs)  # order samples by group
+#chose colors
+palette(c("#1B9E77", "#7570B3", "#E7298A", "#E6AB02", "#D95F02",
+          "#66A61E", "#A6761D", "#B32424", "#B324B3", "#666666"))
+#combine plots
+par(mar=c(7,4,2,1))
+title <- paste ("GSE49454", "/", annotation(gset), sep ="")
+boxplot(ex[,ord], boxwex=0.6, notch=T, main=title, outline=FALSE, las=2, col=gs[ord])
+legend("topleft", groups, fill=palette(), bty="n")
+dev.off()
+
+# expression value distribution
+#combine plots
+par(mar=c(4,4,2,1))
+
+title <- paste ("GSE49454", "/", annotation(gset), " Value Distribution", sep ="")
+plotDensities(ex, group=gs, main=title, legend ="topright")
+
+# UMAP plot (dimensionality reduction)
+ex <- na.omit(ex) # eliminate rows with NAs
+ex <- ex[!duplicated(ex), ]  # remove duplicates
+ump <- umap(t(ex), n_neighbors = 5, random_state = 123)
+par(mar=c(3,3,2,6), xpd=TRUE)
+plot(ump$layout, main="UMAP plot, nbrs=5", xlab="", ylab="", col=gs, pch=20, cex=1.5)
+legend("topright", inset=c(-0.15,0), legend=levels(gs), pch=20,
+col=1:nlevels(gs), title="UMAP",pt.cex=1.5)
+library("maptools")  # point labels without overlaps
+pointLabel(ump$layout, labels = rownames(ump$layout), method="SANN", cex=0.6, doPlot = FALSE)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r, echo=FALSE}
+#https://pubmed.ncbi.nlm.nih.gov/6213147/
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
